@@ -1,0 +1,24 @@
+Pad Thai; Savory
+Pad See Ew; Savory
+Khao Soi; Savory
+Tom Yum Soup; Savory
+Massaman Curry; Savory
+Green Curry; Savory
+Mango Sticky Rice; Dessert
+Thai Coconut Custard; Dessert
+Roti with Banana; Dessert
+Pandan Cake; Dessert
+Sweet Sticky Rice; Dessert
+Coconut Ice Cream; Dessert
+Thai Iced Tea; Beverage
+Lemongrass Iced Tea; Beverage
+Coconut Water; Beverage
+Chrysanthemum Tea; Beverage
+Roselle Juice; Beverage
+Thai Lime Soda; Beverage
+Chicken Satay; Grill
+Grilled Pork Skewers; Grill
+Grilled River Prawns; Grill
+Thai BBQ Chicken; Grill
+Grilled Squid; Grill
+Grilled Beef Skewers; Grill
