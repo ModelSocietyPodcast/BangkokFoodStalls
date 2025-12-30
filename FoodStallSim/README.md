@@ -14,3 +14,6 @@ pip install -r requirements.txt
 With the venv active from FoodStallSim root:
 $env:PYTHONPATH = "src"
 python -m foodstallsim.app
+
+## Tests
+No automated tests are currently defined. The `tests` package is a placeholder for future tests.
