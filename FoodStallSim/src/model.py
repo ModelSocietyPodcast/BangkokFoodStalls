@@ -13,17 +13,21 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from PIL import Image, ImageDraw
+from PIL import Image
 
 SIM_MINUTES_PER_STEP = 6
-REAL_SECONDS_PER_STEP = 1
+REAL_SECONDS_PER_STEP = 0.5
 SIM_START_MINUTES = 6 * 60
 SIM_END_MINUTES = 24 * 60
 SERVICE_TIME_OPTIONS = [6, 12, 18, 24, 30]
+QUEUE_START_SIZE = 9
 BIKE_SPAWN_CHANCE = 0.01
 BIKE_MOVE_CELLS = 2
 BIKE_SIZE_CELLS = 2
 PRICE_GAMMA_SHAPE = 5.0
+SENTIMENT_HAPPY = "Happy"
+SENTIMENT_SATISFIED = "Satisfied"
+SENTIMENT_UNHAPPY = "Unhappy"
 CATEGORY_MEAN_PRICES = {
     "Savory": 80,
     "Dessert": 50,
@@ -76,6 +80,13 @@ class QueuePerson:
     sprite_path: Path
     remaining_minutes: int
     service_minutes: int
+    preferred_category: str
+    disliked_category: str
+    price_quartile: int
+    preferred_prep_minutes: int
+    food_sentiment: str
+    price_sentiment: str
+    time_sentiment: str
 
 
 @dataclass
@@ -110,6 +121,87 @@ def draw_price_for_category(category: str) -> int:
     return max(10, int(round(price)))
 
 
+def build_price_quartiles(categories: list[str], samples: int = 5000) -> dict[str, tuple[float, float, float]]:
+    quartiles: dict[str, tuple[float, float, float]] = {}
+    for category in categories:
+        mean_price = CATEGORY_MEAN_PRICES.get(category, 70)
+        scale = mean_price / PRICE_GAMMA_SHAPE
+        draws = [random.gammavariate(PRICE_GAMMA_SHAPE, scale) for _ in range(samples)]
+        draws.sort()
+        q1 = draws[int(0.25 * (samples - 1))]
+        q2 = draws[int(0.50 * (samples - 1))]
+        q3 = draws[int(0.75 * (samples - 1))]
+        quartiles[category] = (q1, q2, q3)
+    return quartiles
+
+
+def price_to_quartile(price: int, quartiles: tuple[float, float, float]) -> int:
+    q1, q2, q3 = quartiles
+    if price <= q1:
+        return 1
+    if price <= q2:
+        return 2
+    if price <= q3:
+        return 3
+    return 4
+
+
+def evaluate_food_sentiment(preferred: str, disliked: str, actual: str) -> str:
+    if actual == preferred:
+        return SENTIMENT_HAPPY
+    if actual == disliked:
+        return SENTIMENT_UNHAPPY
+    return SENTIMENT_SATISFIED
+
+
+def evaluate_price_sentiment(customer_quartile: int, stall_quartile: int) -> str:
+    if stall_quartile < customer_quartile:
+        return SENTIMENT_HAPPY
+    if stall_quartile > customer_quartile:
+        return SENTIMENT_UNHAPPY
+    return SENTIMENT_SATISFIED
+
+
+def evaluate_time_sentiment(
+    preferred_minutes: int,
+    actual_minutes: int,
+    options: list[int],
+) -> str:
+    sorted_options = sorted(options)
+    preferred_index = sorted_options.index(preferred_minutes)
+    actual_index = sorted_options.index(actual_minutes)
+    if actual_index < preferred_index:
+        return SENTIMENT_HAPPY
+    if actual_index > preferred_index:
+        return SENTIMENT_UNHAPPY
+    return SENTIMENT_SATISFIED
+
+
+def compute_star_rating(
+    food_sentiment: str,
+    price_sentiment: str,
+    time_sentiment: str,
+) -> int:
+    sentiments = [food_sentiment, price_sentiment, time_sentiment]
+    happy = sum(1 for sentiment in sentiments if sentiment == SENTIMENT_HAPPY)
+    unhappy = sum(1 for sentiment in sentiments if sentiment == SENTIMENT_UNHAPPY)
+    if happy == 3:
+        return 5
+    if unhappy == 3:
+        return 1
+    if unhappy >= 2:
+        return 2
+    if happy >= 2:
+        return 4
+    return 3
+
+
+def rating_to_stars(value: float, max_stars: int = 5) -> str:
+    full = int(round(value))
+    full = max(1, min(max_stars, full))
+    return "★" * full + "☆" * (max_stars - full)
+
+
 class FrameRunner:
     def __init__(
         self,
@@ -134,7 +226,6 @@ class FrameRunner:
         self._display_width = self._stage_img.width // 2
         self._display_height = self._stage_img.height // 2
         self._sky_cache: dict[Path, Image.Image] = {}
-        self._grid_overlay: Image.Image | None = None
         self._sprite_cache: dict[tuple[Path, tuple[int, int]], Image.Image] = {}
         self._people_cache: dict[tuple[Path, tuple[int, int]], Image.Image] = {}
         self._stall_coords = [
@@ -154,9 +245,13 @@ class FrameRunner:
         self._stall_prices = [
             draw_price_for_category(category) for _, category in self._stall_dishes
         ]
+        self._food_categories = list(CATEGORY_MEAN_PRICES.keys())
+        self._price_quartiles = build_price_quartiles(self._food_categories)
         self._stall_served_counts = [0 for _ in range(len(self._stall_coords))]
         self._stall_total_service_minutes = [0 for _ in range(len(self._stall_coords))]
         self._stall_revenue = [0 for _ in range(len(self._stall_coords))]
+        self._stall_rating_sum = [0.0 for _ in range(len(self._stall_coords))]
+        self._stall_rating_count = [0 for _ in range(len(self._stall_coords))]
         stall_sprite_paths = sorted(stalls_dir.glob("*.png"))
         self._people_paths = sorted(people_dir.glob("*.png"))
         self._stall_assignments = [
@@ -179,6 +274,17 @@ class FrameRunner:
         self._bike_spawn_chance = BIKE_SPAWN_CHANCE
         self._money_path = stalls_dir.parent / "other" / "Money.png"
         self._has_money = self._money_path.exists()
+        other_dir = stalls_dir.parent / "other"
+        self._rating_paths = {
+            1: other_dir / "Very_Unhappy.png",
+            2: other_dir / "Unhappy.png",
+            3: other_dir / "Neutral.png",
+            4: other_dir / "Happy.png",
+            5: other_dir / "Very_Happy.png",
+        }
+        self._rating_paths = {
+            rating: path for rating, path in self._rating_paths.items() if path.exists()
+        }
         self._service_time_options = list(SERVICE_TIME_OPTIONS)
         self._stall_service_distributions = [
             draw_dirichlet(len(self._service_time_options))
@@ -187,6 +293,8 @@ class FrameRunner:
         self._queues = self._build_queues()
         self._bikes: list[Bike] = []
         self._sale_flash = [0 for _ in range(len(self._stall_coords))]
+        self._rating_flash = [0 for _ in range(len(self._stall_coords))]
+        self._rating_values = [3 for _ in range(len(self._stall_coords))]
         self._port = self._start_server()
         self._render_frame()
 
@@ -270,6 +378,12 @@ class FrameRunner:
             stats = []
             averages = self.get_stall_average_service_times()
             for index, stall_name in enumerate(self._stall_names):
+                rating_count = self._stall_rating_count[index]
+                if rating_count > 0:
+                    rating_avg = self._stall_rating_sum[index] / rating_count
+                else:
+                    rating_avg = 3.0
+                rating_display = f"{rating_to_stars(rating_avg)} {rating_avg:.1f}"
                 dish, category = self._stall_dishes[index]
                 stats.append(
                     {
@@ -278,6 +392,8 @@ class FrameRunner:
                         "price": self._stall_prices[index],
                         "revenue": self._stall_revenue[index],
                         "avg_service_time": averages[index],
+                        "rating_avg": rating_avg,
+                        "rating_display": rating_display,
                     }
                 )
             return stats
@@ -296,20 +412,64 @@ class FrameRunner:
             self.advance_once()
             time.sleep(REAL_SECONDS_PER_STEP)
 
+    def _build_queue_person(
+        self,
+        sprite_path: Path,
+        prep_time: int,
+        stall_category: str,
+        stall_price: int,
+    ) -> QueuePerson:
+        category_choices = random.sample(self._food_categories, len(self._food_categories))
+        preferred_category = category_choices[0]
+        disliked_category = category_choices[-1]
+        food_sentiment = evaluate_food_sentiment(
+            preferred_category,
+            disliked_category,
+            stall_category,
+        )
+        customer_quartile = random.randint(1, 4)
+        stall_quartile = price_to_quartile(
+            stall_price,
+            self._price_quartiles.get(stall_category, (0.0, 0.0, 0.0)),
+        )
+        price_sentiment = evaluate_price_sentiment(customer_quartile, stall_quartile)
+        preferred_prep_minutes = random.choice(self._service_time_options)
+        time_sentiment = evaluate_time_sentiment(
+            preferred_prep_minutes,
+            prep_time,
+            self._service_time_options,
+        )
+        return QueuePerson(
+            sprite_path,
+            prep_time,
+            prep_time,
+            preferred_category,
+            disliked_category,
+            customer_quartile,
+            preferred_prep_minutes,
+            food_sentiment,
+            price_sentiment,
+            time_sentiment,
+        )
+
     def _build_queues(self) -> list[list[QueuePerson]]:
         queues: list[list[QueuePerson]] = []
         if not self._people_paths:
             return queues
         for index in range(len(self._stall_coords)):
             distribution = self._stall_service_distributions[index]
+            _, category = self._stall_dishes[index]
+            price = self._stall_prices[index]
             queue: list[QueuePerson] = []
-            for _ in range(5):
+            for _ in range(QUEUE_START_SIZE):
                 sprite = random.choice(self._people_paths)
                 prep_time = sample_service_time(
                     self._service_time_options,
                     distribution,
                 )
-                queue.append(QueuePerson(sprite, prep_time, prep_time))
+                queue.append(
+                    self._build_queue_person(sprite, prep_time, category, price)
+                )
             queues.append(queue)
         return queues
 
@@ -319,6 +479,9 @@ class FrameRunner:
         for index, remaining in enumerate(self._sale_flash):
             if remaining > 0:
                 self._sale_flash[index] = remaining - 1
+        for index, remaining in enumerate(self._rating_flash):
+            if remaining > 0:
+                self._rating_flash[index] = remaining - 1
         for index, queue in enumerate(self._queues):
             if not queue:
                 continue
@@ -328,14 +491,28 @@ class FrameRunner:
                 self._stall_served_counts[index] += 1
                 self._stall_total_service_minutes[index] += served.service_minutes
                 self._stall_revenue[index] += self._stall_prices[index]
+                rating = compute_star_rating(
+                    served.food_sentiment,
+                    served.price_sentiment,
+                    served.time_sentiment,
+                )
+                self._stall_rating_sum[index] += rating
+                self._stall_rating_count[index] += 1
                 if self._has_money:
                     self._sale_flash[index] = 1
+                if rating in self._rating_paths:
+                    self._rating_flash[index] = 1
+                    self._rating_values[index] = rating
                 sprite = random.choice(self._people_paths)
                 prep_time = sample_service_time(
                     self._service_time_options,
                     self._stall_service_distributions[index],
                 )
-                queue.append(QueuePerson(sprite, prep_time, prep_time))
+                _, category = self._stall_dishes[index]
+                price = self._stall_prices[index]
+                queue.append(
+                    self._build_queue_person(sprite, prep_time, category, price)
+                )
         self._tick_bikes()
 
     def _tick_bikes(self) -> None:
@@ -391,6 +568,22 @@ class FrameRunner:
                         left = round(money_x * cell_w)
                         top = round(frame.height - (money_y + 1) * cell_h)
                         frame.paste(money, (left, top), money)
+            if self._rating_paths:
+                for index, (coord, _) in enumerate(self._stall_assignments):
+                    if self._rating_flash[index] <= 0:
+                        continue
+                    rating = self._rating_values[index]
+                    emoji_path = self._rating_paths.get(rating)
+                    if emoji_path is None:
+                        continue
+                    x, y = coord
+                    emoji_x = x
+                    emoji_y = y + 3
+                    if 0 <= emoji_x < self._cols and 0 <= emoji_y < self._rows:
+                        emoji = self._get_person(emoji_path, cell_w, cell_h)
+                        left = round(emoji_x * cell_w)
+                        top = round(frame.height - (emoji_y + 1) * cell_h)
+                        frame.paste(emoji, (left, top), emoji)
             for index, (coord, _) in enumerate(self._stall_assignments):
                 x, y = coord
                 start_x = x + 1
@@ -420,8 +613,6 @@ class FrameRunner:
                     left = round(bike.x * cell_w)
                     top = round(frame.height - (bike.y + BIKE_SIZE_CELLS) * cell_h)
                     frame.paste(sprite, (left, top), sprite)
-            grid_overlay = self._get_grid_overlay(frame.size)
-            frame = Image.alpha_composite(frame, grid_overlay)
             frame_bytes = io.BytesIO()
             frame.save(frame_bytes, format="PNG")
             self._last_frame = frame_bytes.getvalue()
@@ -436,22 +627,6 @@ class FrameRunner:
         background = sky.copy()
         background.paste(self._stage_img, (0, 0), self._stage_img)
         return background
-
-    def _get_grid_overlay(self, size: tuple[int, int]) -> Image.Image:
-        if self._grid_overlay is not None:
-            return self._grid_overlay
-        overlay = Image.new("RGBA", size, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(overlay)
-        cell_w = size[0] / self._cols
-        cell_h = size[1] / self._rows
-        for x in range(self._cols + 1):
-            x_pos = round(x * cell_w)
-            draw.line([(x_pos, 0), (x_pos, size[1])], fill=(255, 255, 255, 160), width=1)
-        for y in range(self._rows + 1):
-            y_pos = round(y * cell_h)
-            draw.line([(0, y_pos), (size[0], y_pos)], fill=(255, 255, 255, 160), width=1)
-        self._grid_overlay = overlay
-        return overlay
 
     def _get_sprite(self, sprite_path: Path, cell_w: float, cell_h: float) -> Image.Image:
         size = (round(3 * cell_w), round(3 * cell_h))
@@ -532,3 +707,4 @@ class FrameRunner:
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         return port
+

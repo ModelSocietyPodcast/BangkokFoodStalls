@@ -231,13 +231,80 @@ with col_left:
         height=24,
     )
 
-    col_start, col_stop = st.columns(2)
+    if "show_about" not in st.session_state:
+        st.session_state.show_about = True
+
+    def toggle_about() -> None:
+        st.session_state.show_about = not st.session_state.show_about
+    col_start, col_stop, col_toggle, col_audio = st.columns(4)
     with col_start:
         if st.button("Start Clock"):
             runner.start()
     with col_stop:
         if st.button("Stop Clock"):
             runner.stop()
+    with col_toggle:
+        label = "Hide About" if st.session_state.show_about else "Show About"
+        st.button(label, key="toggle_about", on_click=toggle_about)
+    with col_audio:
+        if audio_data_uri:
+            html(
+                f"""
+                <style>
+                .audio-controls {{
+                    margin: 0;
+                }}
+                .audio-controls button {{
+                    background: #111111;
+                    color: #ffffff;
+                    border: none;
+                    border-radius: 999px;
+                    padding: 0.35rem 0.8rem;
+                    font-size: 0.85rem;
+                    cursor: pointer;
+                }}
+                </style>
+                <div class="audio-controls">
+                    <audio id="street-audio" loop preload="auto" src="{audio_data_uri}"></audio>
+                    <button id="audio-enable" type="button">Enable street audio</button>
+                </div>
+                <script>
+                const audio = document.getElementById("street-audio");
+                const enable = document.getElementById("audio-enable");
+                const stateUrl = "http://127.0.0.1:{runner.port}/state.json";
+                let userEnabled = false;
+
+                enable.addEventListener("click", () => {{
+                    userEnabled = true;
+                    audio.volume = 0.5;
+                    audio.play().catch(() => {{}});
+                }});
+
+                async function syncAudio() {{
+                    try {{
+                        const resp = await fetch(stateUrl, {{ cache: "no-store" }});
+                        const data = await resp.json();
+                        if (!userEnabled) {{
+                            return;
+                        }}
+                        if (data.clock_running) {{
+                            if (audio.paused) {{
+                                audio.play().catch(() => {{}});
+                            }}
+                        }} else if (!audio.paused) {{
+                            audio.pause();
+                            audio.currentTime = 0;
+                        }}
+                    }} catch (err) {{
+                        // Ignore transient fetch errors.
+                    }}
+                }}
+                syncAudio();
+                setInterval(syncAudio, {poll_ms});
+                </script>
+                """,
+                height=64,
+            )
     bike_rate = st.slider(
         "Motorbike entry rate (%)",
         min_value=0.0,
@@ -246,66 +313,7 @@ with col_left:
         step=0.5,
     )
     runner.set_bike_spawn_chance(bike_rate / 100.0)
-    if audio_data_uri:
-        html(
-            f"""
-            <style>
-            .audio-controls {{
-                margin: 0.5rem 0 0 0;
-            }}
-            .audio-controls button {{
-                background: #111111;
-                color: #ffffff;
-                border: none;
-                border-radius: 999px;
-                padding: 0.35rem 0.8rem;
-                font-size: 0.85rem;
-                cursor: pointer;
-            }}
-            </style>
-            <div class="audio-controls">
-                <audio id="street-audio" loop preload="auto" src="{audio_data_uri}"></audio>
-                <button id="audio-enable" type="button">Enable street audio</button>
-            </div>
-            <script>
-            const audio = document.getElementById("street-audio");
-            const enable = document.getElementById("audio-enable");
-            const stateUrl = "http://127.0.0.1:{runner.port}/state.json";
-            let userEnabled = false;
 
-            enable.addEventListener("click", () => {{
-                userEnabled = true;
-                audio.volume = 0.5;
-                audio.play().catch(() => {{}});
-            }});
-
-            async function syncAudio() {{
-                try {{
-                    const resp = await fetch(stateUrl, {{ cache: "no-store" }});
-                    const data = await resp.json();
-                    if (!userEnabled) {{
-                        return;
-                    }}
-                    if (data.clock_running) {{
-                        if (audio.paused) {{
-                            audio.play().catch(() => {{}});
-                        }}
-                    }} else if (!audio.paused) {{
-                        audio.pause();
-                        audio.currentTime = 0;
-                    }}
-                }} catch (err) {{
-                    // Ignore transient fetch errors.
-                }}
-            }}
-            syncAudio();
-            setInterval(syncAudio, {poll_ms});
-            </script>
-            """,
-            height=64,
-        )
-
-    st.markdown("### About")
     st.markdown(
         f"""
         <style>
@@ -343,13 +351,27 @@ with col_left:
         """,
         unsafe_allow_html=True,
     )
-    st.text_area(
-        "Simulation message",
-        value="Stage preview with layered sky backgrounds and discrete queue movement.",
-        height=200,
-        disabled=True,
-        label_visibility="collapsed",
-    )
+
+    if st.session_state.show_about:
+        st.markdown("### About")
+        st.text_area(
+            "Simulation message",
+            value=(
+                "Hungry customers line up in front of their favorite stalls. Their "
+                "preferences vary - some are in the mood for something savory, while "
+                "others may be determined to indulge a sweet tooth. They might also be "
+                "more or less frugal with their money and/or time. Stalls, similarly, "
+                "are heterogenous - some are ramshackle establishments offering authentic "
+                "Thai delicacies for next to nothing, while others are sleek, shiny, and "
+                "costly. Once customers receive their food, money changes hands, and they "
+                "rate the service they've received. You can see the amount of revenue "
+                "each stall collects over the course of the day and average service "
+                "times and ratings in the 'Food Stall Stats' table below!"
+            ),
+            height=200,
+            disabled=True,
+            label_visibility="collapsed",
+        )
 
     st.markdown("### Food Stall Stats")
     html(
@@ -389,6 +411,7 @@ with col_left:
             html += "<th>Price</th>";
             html += "<th>Revenue</th>";
             html += "<th>Avg Service (min)</th>";
+            html += "<th>Rating</th>";
             html += "</tr></thead><tbody>";
             for (const row of rows) {{
                 html += "<tr>";
@@ -397,6 +420,7 @@ with col_left:
                 html += `<td>${{row.price}} baht</td>`;
                 html += `<td>${{row.revenue}} baht</td>`;
                 html += `<td>${{row.avg_service_time}} min</td>`;
+                html += `<td>${{row.rating_display}}</td>`;
                 html += "</tr>";
             }}
             html += "</tbody></table>";
