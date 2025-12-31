@@ -1,3 +1,5 @@
 mesa
 solara
 matplotlib
+streamlit
+pillow
