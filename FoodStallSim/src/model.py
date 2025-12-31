@@ -222,10 +222,13 @@ class FrameRunner:
         self._clock_running = False
         self._thread = None
         self._last_frame = b""
+        self._last_dynamic_frame = b""
         self._stage_img = Image.open(stage_path).convert("RGBA")
         self._display_width = self._stage_img.width // 2
         self._display_height = self._stage_img.height // 2
         self._sky_cache: dict[Path, Image.Image] = {}
+        self._base_frame_cache: dict[Path, Image.Image] = {}
+        self._base_frame_bytes_cache: dict[Path, bytes] = {}
         self._sprite_cache: dict[tuple[Path, tuple[int, int]], Image.Image] = {}
         self._people_cache: dict[tuple[Path, tuple[int, int]], Image.Image] = {}
         self._stall_coords = [
@@ -343,6 +346,23 @@ class FrameRunner:
     def get_frame_bytes(self) -> bytes:
         with self._lock:
             return self._last_frame
+
+    def get_dynamic_frame_bytes(self) -> bytes:
+        with self._lock:
+            return self._last_dynamic_frame
+
+    def get_base_frame_bytes(self) -> bytes:
+        with self._lock:
+            sky_path = self._stage_path.parent / get_sky_filename(self._sim_minutes)
+            cached = self._base_frame_bytes_cache.get(sky_path)
+            if cached is not None:
+                return cached
+            base_frame = self._get_base_frame(sky_path)
+            frame_bytes = io.BytesIO()
+            base_frame.save(frame_bytes, format="PNG")
+            cached = frame_bytes.getvalue()
+            self._base_frame_bytes_cache[sky_path] = cached
+            return cached
 
     def get_stall_names(self) -> list[str]:
         with self._lock:
@@ -547,15 +567,10 @@ class FrameRunner:
     def _render_frame(self) -> None:
         with self._lock:
             sky_path = self._stage_path.parent / get_sky_filename(self._sim_minutes)
-            background = self._get_background(sky_path)
-            frame = background.copy()
+            base_frame = self._get_base_frame(sky_path)
+            frame = Image.new("RGBA", base_frame.size, (0, 0, 0, 0))
             cell_w = frame.width / self._cols
             cell_h = frame.height / self._rows
-            for (x, y), sprite_path in self._stall_assignments:
-                sprite = self._get_sprite(sprite_path, cell_w, cell_h)
-                left = round(x * cell_w)
-                top = round(frame.height - (y + 3) * cell_h)
-                frame.paste(sprite, (left, top), sprite)
             if self._has_money:
                 for index, (coord, _) in enumerate(self._stall_assignments):
                     if self._sale_flash[index] <= 0:
@@ -615,18 +630,37 @@ class FrameRunner:
                     frame.paste(sprite, (left, top), sprite)
             frame_bytes = io.BytesIO()
             frame.save(frame_bytes, format="PNG")
-            self._last_frame = frame_bytes.getvalue()
+            self._last_dynamic_frame = frame_bytes.getvalue()
+            composite = base_frame.copy()
+            composite.alpha_composite(frame)
+            composite_bytes = io.BytesIO()
+            composite.save(composite_bytes, format="PNG")
+            self._last_frame = composite_bytes.getvalue()
 
-    def _get_background(self, sky_path: Path) -> Image.Image:
+    def _get_base_frame(self, sky_path: Path) -> Image.Image:
+        cached = self._base_frame_cache.get(sky_path)
+        if cached is not None:
+            return cached
         sky = self._sky_cache.get(sky_path)
         if sky is None:
             sky = Image.open(sky_path).convert("RGBA")
             self._sky_cache[sky_path] = sky
         if sky.size != self._stage_img.size:
             sky = sky.resize(self._stage_img.size)
-        background = sky.copy()
-        background.paste(self._stage_img, (0, 0), self._stage_img)
-        return background
+        frame = sky.copy()
+        frame.paste(self._stage_img, (0, 0), self._stage_img)
+        cell_w = frame.width / self._cols
+        cell_h = frame.height / self._rows
+        for (x, y), sprite_path in self._stall_assignments:
+            sprite = self._get_sprite(sprite_path, cell_w, cell_h)
+            left = round(x * cell_w)
+            top = round(frame.height - (y + 3) * cell_h)
+            frame.paste(sprite, (left, top), sprite)
+        self._base_frame_cache[sky_path] = frame
+        frame_bytes = io.BytesIO()
+        frame.save(frame_bytes, format="PNG")
+        self._base_frame_bytes_cache[sky_path] = frame_bytes.getvalue()
+        return frame
 
     def _get_sprite(self, sprite_path: Path, cell_w: float, cell_h: float) -> Image.Image:
         size = (round(3 * cell_w), round(3 * cell_h))
