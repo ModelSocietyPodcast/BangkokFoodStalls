@@ -20,7 +20,13 @@ from streamlit.components.v1 import html
 import mesa
 from mesa.space import MultiGrid
 
-from model import FrameRunner, REAL_SECONDS_PER_STEP, load_dish_catalog, load_stall_names
+from model import (
+    FrameRunner,
+    REAL_SECONDS_PER_STEP,
+    SIM_MINUTES_PER_STEP,
+    load_dish_catalog,
+    load_stall_names,
+)
 
 @st.cache_resource(show_spinner=False)
 def get_runner(
@@ -150,37 +156,16 @@ runner = get_runner(
 )
 display_width = runner.display_width
 display_height = runner.display_height
-poll_ms = max(500, int(REAL_SECONDS_PER_STEP * 1000 / 2))
+poll_seconds = max(0.5, REAL_SECONDS_PER_STEP / 2)
+stats_refresh_seconds = max(
+    5.0,
+    (60 / SIM_MINUTES_PER_STEP) * REAL_SECONDS_PER_STEP,
+)
 
 with col_right:
     st.markdown('<div class="grid-anchor"></div>', unsafe_allow_html=True)
     st.markdown('<div class="grid-wrap">', unsafe_allow_html=True)
-    html(
-        f"""
-        <style>
-        body {{
-            margin: 0;
-        }}
-        </style>
-        <img
-            id="grid-frame"
-            src="http://127.0.0.1:{runner.port}/frame.png"
-            style="width: {display_width}px; height: auto; display: block;"
-        />
-        <script>
-        const img = document.getElementById("grid-frame");
-        const base = "http://127.0.0.1:{runner.port}/frame.png";
-        const pollMs = {poll_ms};
-        function refresh() {{
-            img.src = base + "?t=" + Date.now();
-        }}
-        refresh();
-        setInterval(refresh, pollMs);
-        </script>
-        """,
-        height=display_height + 16,
-        width=display_width + 16,
-    )
+    frame_container = st.empty()
     st.markdown("</div>", unsafe_allow_html=True)
 
 # -----------------------------
@@ -203,33 +188,7 @@ with col_left:
     )
 
     st.markdown("### Simulation Time")
-    html(
-        f"""
-        <style>
-        body {{
-            margin: 0;
-            font-family: "Source Sans Pro", sans-serif;
-        }}
-        </style>
-        <div id="sim-time">Sim time: --</div>
-        <script>
-        const label = document.getElementById("sim-time");
-        const url = "http://127.0.0.1:{runner.port}/state.json";
-        async function updateTime() {{
-            try {{
-                const resp = await fetch(url, {{ cache: "no-store" }});
-                const data = await resp.json();
-                label.textContent = "Sim time: " + data.sim_time;
-            }} catch (err) {{
-                // Ignore transient fetch errors.
-            }}
-        }}
-        updateTime();
-        setInterval(updateTime, {poll_ms});
-        </script>
-        """,
-        height=24,
-    )
+    sim_time_container = st.empty()
 
     if "show_about" not in st.session_state:
         st.session_state.show_about = True
@@ -247,64 +206,43 @@ with col_left:
         label = "Hide About" if st.session_state.show_about else "Show About"
         st.button(label, key="toggle_about", on_click=toggle_about)
     with col_audio:
+        audio_container = st.empty()
+        audio_sync_container = st.empty()
         if audio_data_uri:
-            html(
-                f"""
-                <style>
-                .audio-controls {{
-                    margin: 0;
-                }}
-                .audio-controls button {{
-                    background: #111111;
-                    color: #ffffff;
-                    border: none;
-                    border-radius: 999px;
-                    padding: 0.35rem 0.8rem;
-                    font-size: 0.85rem;
-                    cursor: pointer;
-                }}
-                </style>
-                <div class="audio-controls">
-                    <audio id="street-audio" loop preload="auto" src="{audio_data_uri}"></audio>
-                    <button id="audio-enable" type="button">Enable street audio</button>
-                </div>
-                <script>
-                const audio = document.getElementById("street-audio");
-                const enable = document.getElementById("audio-enable");
-                const stateUrl = "http://127.0.0.1:{runner.port}/state.json";
-                let userEnabled = false;
-
-                enable.addEventListener("click", () => {{
-                    userEnabled = true;
-                    audio.volume = 0.5;
-                    audio.play().catch(() => {{}});
-                }});
-
-                async function syncAudio() {{
-                    try {{
-                        const resp = await fetch(stateUrl, {{ cache: "no-store" }});
-                        const data = await resp.json();
-                        if (!userEnabled) {{
-                            return;
-                        }}
-                        if (data.clock_running) {{
-                            if (audio.paused) {{
-                                audio.play().catch(() => {{}});
-                            }}
-                        }} else if (!audio.paused) {{
-                            audio.pause();
-                            audio.currentTime = 0;
-                        }}
-                    }} catch (err) {{
-                        // Ignore transient fetch errors.
+            with audio_container:
+                html(
+                    f"""
+                    <style>
+                    .audio-controls {{
+                        margin: 0;
                     }}
-                }}
-                syncAudio();
-                setInterval(syncAudio, {poll_ms});
-                </script>
-                """,
-                height=64,
-            )
+                    .audio-controls button {{
+                        background: #111111;
+                        color: #ffffff;
+                        border: none;
+                        border-radius: 999px;
+                        padding: 0.35rem 0.8rem;
+                        font-size: 0.85rem;
+                        cursor: pointer;
+                    }}
+                    </style>
+                    <div class="audio-controls">
+                        <audio id="street-audio" loop preload="auto" src="{audio_data_uri}"></audio>
+                        <button id="audio-enable" type="button">Enable street audio</button>
+                    </div>
+                    <script>
+                    const audio = document.getElementById("street-audio");
+                    const enable = document.getElementById("audio-enable");
+                    const key = "street-audio-enabled";
+                    enable.addEventListener("click", () => {{
+                        localStorage.setItem(key, "true");
+                        audio.volume = 0.5;
+                        audio.play().catch(() => {{}});
+                    }});
+                    </script>
+                    """,
+                    height=64,
+                )
     bike_rate = st.slider(
         "Motorbike entry rate (%)",
         min_value=0.0,
@@ -318,7 +256,7 @@ with col_left:
         f"""
         <style>
         .block-container {{
-            padding-top: 0;
+            padding-top: 1.25rem;
             padding-left: 0.5rem;
             padding-right: 0;
             max-width: 100%;
@@ -373,72 +311,93 @@ with col_left:
             label_visibility="collapsed",
         )
 
-    st.markdown("### Food Stall Stats")
-    html(
-        f"""
-        <style>
-        @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;600&display=swap');
-        table.stats {{
-            width: 100%;
-            border-collapse: collapse;
-            font-size: 0.88rem;
-            font-family: "IBM Plex Sans", "Source Sans Pro", sans-serif;
-        }}
-        table.stats th,
-        table.stats td {{
-            border: 1px solid #d0d0d0;
-            padding: 6px 8px;
-            text-align: left;
-            white-space: normal;
-            overflow-wrap: anywhere;
-        }}
-        table.stats th {{
-            background: #f4c2c2;
-        }}
-        .stats-scroll {{
-            max-height: 240px;
-            overflow-y: auto;
-        }}
-        </style>
-        <div id="stall-stats" class="stats-scroll">Loading stats...</div>
-        <script>
-        const statsUrl = "http://127.0.0.1:{runner.port}/stats.json";
-        const container = document.getElementById("stall-stats");
-        function renderStats(rows) {{
-            let html = "<table class='stats'><thead><tr>";
-            html += "<th>Stall</th>";
-            html += "<th>Specialty</th>";
-            html += "<th>Price</th>";
-            html += "<th>Revenue</th>";
-            html += "<th>Avg Service (min)</th>";
-            html += "<th>Rating</th>";
-            html += "</tr></thead><tbody>";
-            for (const row of rows) {{
-                html += "<tr>";
-                html += `<td>${{row.stall_name}}</td>`;
-                html += `<td>${{row.specialty}}</td>`;
-                html += `<td>${{row.price}} baht</td>`;
-                html += `<td>${{row.revenue}} baht</td>`;
-                html += `<td>${{row.avg_service_time}} min</td>`;
-                html += `<td>${{row.rating_display}}</td>`;
-                html += "</tr>";
-            }}
-            html += "</tbody></table>";
-            container.innerHTML = html;
-        }}
-        async function refreshStats() {{
-            try {{
-                const resp = await fetch(statsUrl, {{ cache: "no-store" }});
-                const rows = await resp.json();
-                renderStats(rows);
-            }} catch (err) {{
-                // Ignore transient fetch errors.
-            }}
-        }}
-        refreshStats();
-        setInterval(refreshStats, {poll_ms});
-        </script>
-        """,
-        height=300,
+    stats_title_container = st.empty()
+    stats_container = st.empty()
+    if "last_stats_hour" not in st.session_state:
+        st.session_state.last_stats_hour = None
+        st.session_state.last_stats_rows = []
+        st.session_state.last_stats_label = "### Food Stall Stats (last updated at --:--)"
+    if "last_clock_running" not in st.session_state:
+        st.session_state.last_clock_running = None
+
+
+@st.fragment(run_every=poll_seconds)
+def refresh_frame_and_time() -> None:
+    state = runner.get_state()
+    sim_time_container.markdown(f"Sim time: {state['sim_time']}")
+    frame_container.image(
+        runner.get_frame_bytes(),
+        width=display_width,
     )
+    if audio_data_uri:
+        with audio_sync_container:
+            html(
+                f"""
+                <script>
+                const audio = document.getElementById("street-audio");
+                if (audio) {{
+                    const enabled = localStorage.getItem("street-audio-enabled") === "true";
+                    if ({str(state["clock_running"]).lower()}) {{
+                        if (enabled && audio.paused) {{
+                            audio.play().catch(() => {{}});
+                        }}
+                    }} else {{
+                        audio.pause();
+                        audio.currentTime = 0;
+                    }}
+                }}
+                </script>
+                """,
+                height=0,
+                width=0,
+            )
+
+
+@st.fragment(run_every=stats_refresh_seconds)
+def refresh_stats() -> None:
+    state = runner.get_state()
+    current_hour = state["sim_minutes"] // 60
+    last_hour = st.session_state.last_stats_hour
+    if last_hour is None or current_hour > last_hour:
+        stats_rows = []
+        for row in runner.get_stall_stats():
+            stats_rows.append(
+                {
+                    "Stall": row["stall_name"],
+                    "Specialty": row["specialty"],
+                    "Price (baht)": row["price"],
+                    "Revenue (baht)": row["revenue"],
+                    "Avg Service (min)": row["avg_service_time"],
+                    "Rating": row["rating_display"],
+                }
+            )
+        st.session_state.last_stats_hour = current_hour
+        st.session_state.last_stats_rows = stats_rows
+        st.session_state.last_stats_label = (
+            f"### Food Stall Stats (last updated at {current_hour:02d}:00)"
+        )
+    stats_title_container.markdown(st.session_state.last_stats_label)
+    if st.session_state.last_stats_rows:
+        stats_container.dataframe(
+            st.session_state.last_stats_rows,
+            width="stretch",
+            hide_index=True,
+            height=260,
+        )
+    else:
+        stats_container.caption("Loading stats...")
+    stats_title_container.markdown(st.session_state.last_stats_label)
+    if st.session_state.last_stats_rows:
+        stats_container.dataframe(
+            st.session_state.last_stats_rows,
+            use_container_width=True,
+            hide_index=True,
+            height=260,
+        )
+    else:
+        stats_container.caption("Loading stats...")
+
+
+refresh_frame_and_time()
+refresh_stats()
 
